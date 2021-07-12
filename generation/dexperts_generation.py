@@ -39,7 +39,7 @@ class DExpertsGeneration(GPT2Generation):
         else:
             self.expert = None
         
-        self.tokenizer = GPT2Tokenizer.from_pretrained(tokenizer, pad_token=self.STOP_TOKEN)
+        self.tokenizer = GPT2Tokenizer.from_pretrained(base_model, pad_token=self.STOP_TOKEN)
         assert self.tokenizer.eos_token_id == self.tokenizer.pad_token_id
 
     def __repr__(self):
@@ -75,20 +75,20 @@ class DExpertsGeneration(GPT2Generation):
         with torch.no_grad():
             for step in range(max_len):
                 # base model prediction
-                base_logits, base_past = self.base_model(
-                    input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)
+                base_logits = self.base_model(
+                    input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)["logits"]
                 
                 # expert prediction
                 if self.expert:
-                    expert_logits, expert_past = self.expert(
-                        input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)
+                    expert_logits = self.expert(
+                        input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)["logits"]
                 else:
                     expert_logits = base_logits
                 
                 # antiexpert prediction
                 if self.antiexpert:
-                    antiexpert_logits, antiexpert_past = self.antiexpert(
-                        input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)
+                    antiexpert_logits = self.antiexpert(
+                        input_ids, attention_mask=attention_mask, position_ids=position_ids, **model_kwargs)["logits"]
                 else:
                     antiexpert_logits = base_logits
                 

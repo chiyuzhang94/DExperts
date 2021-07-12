@@ -12,7 +12,6 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.
 """
 Fine-tuning the library models for language modeling on a text file (GPT, GPT-2, BERT, RoBERTa).
 GPT and GPT-2 are fine-tuned using a causal language modeling (CLM) loss while BERT and RoBERTa are fine-tuned
@@ -212,10 +211,10 @@ def main():
         )
 
     if data_args.block_size <= 0:
-        data_args.block_size = tokenizer.max_len
+        data_args.block_size = tokenizer.model_max_length
         # Our input block size will be the max possible for the model
     else:
-        data_args.block_size = min(data_args.block_size, tokenizer.max_len)
+        data_args.block_size = min(data_args.block_size, tokenizer.model_max_length)
 
     # Get datasets
 
@@ -231,8 +230,7 @@ def main():
         args=training_args,
         data_collator=data_collator,
         train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        prediction_loss_only=True,
+        eval_dataset=eval_dataset
     )
 
     # Training
