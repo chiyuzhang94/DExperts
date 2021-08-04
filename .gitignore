@@ -3,6 +3,8 @@
 *.py[cod]
 .vscode/
 
+*.sh
+
 scripts/sbatch_scripts
 human_eval/sentiment/old_comparisons
 human_eval/sentiment/*batch_results.csv
