@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=12:00:00
+#SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
@@ -23,7 +23,7 @@ source ~/py38_tf46/bin/activate
 ALPHA=3.2
 EXPERT_SIZE=large
 MODEL_DIR=/home/chiyu94/scratch/hashtag_paraphrase/formality/fine-tuned
-PROMPTS_DATASET=/home/chiyu94/scratch/dexperts/prompts/sentiment_prompts-10k/neutral_prompts.jsonl
+PROMPTS_DATASET=/home/chiyu94/scratch/dexperts/prompts/sentiment_prompts-10k/neutral_prompts2.jsonl
 OUTPUT_DIR=/home/chiyu94/scratch/hashtag_paraphrase/formality/generate_out/formal/
 
 python -m scripts.run_sentiment_experiment \
