@@ -48,7 +48,7 @@ class CustomDataset(Dataset):
 
         label = str(self.labels[index])
         
-        input_st = source_text
+        input_st = source_text #.replace(self.source_cls+"_CLS: ", "") 
 
         return {
             'para_text': source_text,
@@ -87,8 +87,9 @@ class DExpertsGeneration:
     def __init__(
         self, 
         base_model: Union[str, Path, T5ForConditionalGeneration],
+        antiexpert_model: Union[str, Path, T5ForConditionalGeneration] = None,
         expert_model: Union[str, Path, T5ForConditionalGeneration] = None,
-        tokenizer: str = 'gpt2', 
+        tokenizer: str = 't5-base', 
         seed: int = 42,
         expert_prefix: str = None,
         antiexpert_prefix: str = None
@@ -103,6 +104,11 @@ class DExpertsGeneration:
 
         self.base_model = T5ForConditionalGeneration.from_pretrained(base_model).to(self.device)
         
+        if antiexpert_model:
+            self.antiexpert = T5ForConditionalGeneration.from_pretrained(antiexpert_model).to(self.device)
+        else:
+            self.antiexpert = None
+        
         if expert_model:
             self.expert = T5ForConditionalGeneration.from_pretrained(expert_model).to(self.device)
         else:
@@ -113,27 +119,34 @@ class DExpertsGeneration:
         assert self.tokenizer.eos_token_id == self.tokenizer.pad_token_id
 
     def generate(self,
-                 prompt: Union[str, List[str]],
-                 max_len: int = 20,
-                 sample: bool = True,
-                 filter_p: float = 0.9,
-                 k: int = 0,
-                 p: float = 1.0,
-                 temperature: float = 1.0,
-                 alpha: float = 0.0
-                ):
-        if isinstance(prompt, str):
-            source = [prompt]
-        else:
-            source = prompt
+             para_text: Union[str, List[str]],
+             base_source: Union[str, List[str]],
+             max_len: int = 20,
+             sample: bool = True,
+             filter_p: float = 0.9,
+             k: int = 0,
+             p: float = 1.0,
+             temperature: float = 1.0,
+             alpha: float = 0.0
+            ):
         
-        source_rm = [x.split("_CLS: ")[-1].strip() for x in source]
-        source_base = ["paraphrase: " + x for x in source_rm]
-        source_expert = [self.expert_prefix + x for x in source_rm]
-        source_antiexpert = [self.antiexpert_prefix + x for x in source_rm]
+        if isinstance(para_text, str):
+            para_text = [para_text]
+        else:
+            para_text = para_text
+            
+        if isinstance(base_source, str):
+            base_source = [base_source]
+        else:
+            base_source = base_source
+            
+        source_base = ["paraphrase: " + x for x in base_source]
+        
+        source_expert = para_text
+        source_antiexpert = para_text
         
         target = []
-        for x in source:
+        for x in source_base:
             target.append("<pad>")
             
         encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, pad_to_max_length=True, return_tensors='pt')
@@ -160,6 +173,8 @@ class DExpertsGeneration:
         self.base_model.eval()
         if self.expert:
             self.expert.eval()
+        if self.antiexpert:
+            self.antiexpert.eval()
         with torch.no_grad():
             for step in range(max_len):
                 # base model prediction
@@ -176,9 +191,9 @@ class DExpertsGeneration:
                     expert_logits = base_logits
                 
                 # antiexpert prediction
-                if self.expert:
+                if self.antiexpert:
                     #print("antiexpert ", source_antiexpert[0])
-                    antiexpert_logits = self.expert(input_ids_anti, attention_mask = attention_mask_anti, 
+                    antiexpert_logits = self.antiexpert(input_ids_anti, attention_mask = attention_mask_anti, 
                                                        decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask)["logits"]
                 else:
                     antiexpert_logits = base_logits
@@ -264,6 +279,9 @@ def main():
     parser.add_argument("--target_cls", default=None, type=str, required=True,
                     help="Prefix of target style")
     
+    parser.add_argument("--orginal_base", action='store_true',
+                help="Whether give the orignial text as base model's input.")
+    
     ## Other parameters
     parser.add_argument("--max_seq_length", default=128, type=int,
                         help="The maximum total input sequence length after tokenization. Sequences longer "
@@ -293,8 +311,7 @@ def main():
     generator = DExpertsGeneration(
         base_model=args.base_model_name, 
         expert_model=args.expert_model_name,
-        expert_prefix = args.target_cls + "_CLS: ",
-        antiexpert_prefix = args.source_cls + "_CLS: "
+        antiexpert_model=args.anti_model_name
     )
     
     
@@ -304,10 +321,16 @@ def main():
 
     file_name = args.input_file.split("/")[-1].replace(".tsv", "")
     
-    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name,"dexperts-one",args.source_cls,args.target_cls,str(args.top_p)))
+    model_name = "dexpert-mul"
+    
+    if args.orginal_base:
+        model_name = model_name + "-org"
+    
+    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name, model_name, args.source_cls, args.target_cls,str(args.top_p)))
+    
     if os.path.exists(output_file):
         os.remove(output_file)
-        
+
     for ind, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
         
         labels = batch["label"]
@@ -315,9 +338,14 @@ def main():
         org_tweets = batch["org_tweet"]
         trans_input_text = batch["trans_input_text"]
         
+        if args.orginal_base: 
+            base_source = org_tweets
+        else:
+            base_source = trans_input_text
         
         final_outputs, source_base, source_expert, source_antiexpert = generator.generate(
-         trans_input_text,
+         para_text = trans_input_text,
+         base_source = base_source,
          max_len = 128,
          sample = False,
          filter_p = 0.9,

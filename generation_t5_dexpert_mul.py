@@ -48,7 +48,7 @@ class CustomDataset(Dataset):
 
         label = str(self.labels[index])
         
-        input_st = source_text.replace(self.source_cls+"_CLS: ", "") 
+        input_st = source_text #.replace(self.source_cls+"_CLS: ", "") 
 
         return {
             'para_text': source_text,
@@ -300,9 +300,7 @@ def main():
     generator = DExpertsGeneration(
         base_model=args.base_model_name, 
         expert_model=args.expert_model_name,
-        antiexpert_model=args.anti_model_name,
-        expert_prefix = args.target_cls + "_CLS: ",
-        antiexpert_prefix = args.source_cls + "_CLS: "
+        antiexpert_model=args.anti_model_name
     )
     
     

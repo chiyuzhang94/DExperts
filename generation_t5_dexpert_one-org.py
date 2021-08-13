@@ -113,7 +113,8 @@ class DExpertsGeneration:
         assert self.tokenizer.eos_token_id == self.tokenizer.pad_token_id
 
     def generate(self,
-                 prompt: Union[str, List[str]],
+                 para_text: Union[str, List[str]],
+                 org_text: Union[str, List[str]],
                  max_len: int = 20,
                  sample: bool = True,
                  filter_p: float = 0.9,
@@ -122,18 +123,25 @@ class DExpertsGeneration:
                  temperature: float = 1.0,
                  alpha: float = 0.0
                 ):
-        if isinstance(prompt, str):
-            source = [prompt]
-        else:
-            source = prompt
         
-        source_rm = [x.split("_CLS: ")[-1].strip() for x in source]
+        if isinstance(para_text, str):
+            para_text = [para_text]
+        else:
+            para_text = para_text
+            
+        if isinstance(org_text, str):
+            org_text = [org_text]
+        else:
+            org_text = org_text
+        
+        source_rm = [x.split("_CLS: ")[-1].strip() for x in org_text]
         source_base = ["paraphrase: " + x for x in source_rm]
-        source_expert = [self.expert_prefix + x for x in source_rm]
-        source_antiexpert = [self.antiexpert_prefix + x for x in source_rm]
+        
+        source_expert = [self.expert_prefix + x for x in para_text]
+        source_antiexpert = [self.antiexpert_prefix + x for x in para_text]
         
         target = []
-        for x in source:
+        for x in source_base:
             target.append("<pad>")
             
         encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, pad_to_max_length=True, return_tensors='pt')
@@ -143,7 +151,6 @@ class DExpertsGeneration:
         encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, pad_to_max_length=True, return_tensors='pt')
         input_ids_exper = encodings_dict_expert['input_ids'].to(self.device)
         attention_mask_exper = encodings_dict_expert['attention_mask'].to(self.device)
-        
         
         encodings_dict_anti = self.tokenizer.batch_encode_plus(source_antiexpert, pad_to_max_length=True, return_tensors='pt')
         input_ids_anti = encodings_dict_anti['input_ids'].to(self.device)
@@ -264,6 +271,9 @@ def main():
     parser.add_argument("--target_cls", default=None, type=str, required=True,
                     help="Prefix of target style")
     
+    parser.add_argument("--orginal_base", action='store_true',
+                help="Whether give the orignial text as base model's input.")
+    
     ## Other parameters
     parser.add_argument("--max_seq_length", default=128, type=int,
                         help="The maximum total input sequence length after tokenization. Sequences longer "
@@ -304,7 +314,13 @@ def main():
 
     file_name = args.input_file.split("/")[-1].replace(".tsv", "")
     
-    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name,"dexperts-one",args.source_cls,args.target_cls,str(args.top_p)))
+    model_name = "dexpert-one"
+    
+    if args.orginal_base:
+        model_name = model_name + "-org"
+    
+    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name, model_name, args.source_cls, args.target_cls,str(args.top_p)))
+    
     if os.path.exists(output_file):
         os.remove(output_file)
         
@@ -315,9 +331,14 @@ def main():
         org_tweets = batch["org_tweet"]
         trans_input_text = batch["trans_input_text"]
         
+        if args.orginal_base: 
+            base_source = org_tweets
+        else:
+            base_source = trans_input_text
         
         final_outputs, source_base, source_expert, source_antiexpert = generator.generate(
-         trans_input_text,
+         para_text = trans_input_text,
+         org_text = base_source,
          max_len = 128,
          sample = False,
          filter_p = 0.9,

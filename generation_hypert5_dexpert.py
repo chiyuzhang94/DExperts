@@ -1,13 +1,13 @@
 import torch
-from transformers import T5ForConditionalGeneration,T5TokenizerFast
 from torch.utils.data import Dataset, DataLoader, SequentialSampler
 import GPUtil
 import re, regex
-import json, sys, regex
+import json, sys
 import argparse
 import logging
 import glob
 import os
+import datasets
 from tqdm import tqdm, trange
 import pandas as pd
 import torch.nn as nn
@@ -16,8 +16,21 @@ from pathlib import Path
 from typing import Union, List
 
 import torch.nn.functional as F
-from transformers import T5ForConditionalGeneration, T5TokenizerFast
-from generation.gpt2_generation import GPT2Generation
+from transformers import AutoTokenizer, HfArgumentParser, set_seed
+from transformers.trainer_utils import EvaluationStrategy
+
+from hyperformer.third_party.models import T5Config
+from hyperformer.third_party.trainers import T5Trainer
+from hyperformer.third_party.trainers import T5Generator
+
+from hyperformer.adapters import AdapterController, AutoAdapterConfig
+from hyperformer.data import AutoTask
+from hyperformer.third_party.utils import TaskCollator, check_output_dir
+from hyperformer.metrics import build_compute_metrics_fn
+from hyperformer.training_args import Seq2SeqTrainingArguments, ModelArguments, DataTrainingArguments, \
+    AdapterTrainingArguments
+from hyperformer.utils import freezing_params, get_last_checkpoint_path, create_dir,\
+    handle_metrics, get_training_args
 
 from utils import utils
 from utils.generation_utils import top_k_top_p_filtering
@@ -57,16 +70,10 @@ class CustomDataset(Dataset):
             'label': label
         }
 
-def regular_encode(args, file_path, shuffle=True, num_workers = 1, batch_size=64, maxlen = 32, mode = 'train'):
+def regular_encode(args, file_path, shuffle=True, num_workers = 1, batch_size=64, maxlen = 32):
     
     # if we are in train mode, we will load two columns (i.e., text and label).
-    if mode == 'train':
-        # Use pandas to load dataset
-        df = pd.read_csv(file_path, delimiter='\t',header=0, names=['source', 'target', 'label'], encoding='utf-8', quotechar='"')
-
-    else:
-        print("the type of mode should be either 'train' or 'predict'. ")
-        return
+    df = pd.read_csv(file_path, delimiter='\t',header=0, names=['source', 'target', 'label'], encoding='utf-8', quotechar='"')
         
     print("{} Dataset: {}".format(file_path, df.shape))
     
@@ -86,34 +93,38 @@ class DExpertsGeneration:
 
     def __init__(
         self, 
-        base_model: Union[str, Path, T5ForConditionalGeneration],
-        expert_model: Union[str, Path, T5ForConditionalGeneration] = None,
-        tokenizer: str = 'gpt2', 
+        base_model,
+        expert_model,
+        tokenizer: str = 't5-base',
         seed: int = 42,
-        expert_prefix: str = None,
-        antiexpert_prefix: str = None
+        expert_cls: str = None,
+        antiexpert_cls: str = None
         ):
         # Set up device
-        self.expert_prefix = expert_prefix
-        self.antiexpert_prefix = antiexpert_prefix
+        self.expert_cls = expert_cls
+        self.antiexpert_cls = antiexpert_cls
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         n_gpu = torch.cuda.device_count()
         utils.set_seed(seed, n_gpu)
-
+        
+        from transformers import T5ForConditionalGeneration
+        
         self.base_model = T5ForConditionalGeneration.from_pretrained(base_model).to(self.device)
         
-        if expert_model:
-            self.expert = T5ForConditionalGeneration.from_pretrained(expert_model).to(self.device)
-        else:
-            self.expert = None
+        self.expert = expert_model.to(self.device)
+
+        self.expert_task_embedding = self.expert.task_embedding_controller(self.expert_cls).to(self.device)
+        self.anti_task_embedding = self.expert.task_embedding_controller(self.antiexpert_cls).to(self.device)
         
-        self.tokenizer = T5TokenizerFast.from_pretrained(base_model)
+        self.tokenizer = AutoTokenizer.from_pretrained(base_model)
         self.tokenizer.pad_token = self.STOP_TOKEN
+        
         assert self.tokenizer.eos_token_id == self.tokenizer.pad_token_id
 
     def generate(self,
-                 prompt: Union[str, List[str]],
+                 para_text: Union[str, List[str]],
+                 base_source: Union[str, List[str]] = None,
                  max_len: int = 20,
                  sample: bool = True,
                  filter_p: float = 0.9,
@@ -122,32 +133,37 @@ class DExpertsGeneration:
                  temperature: float = 1.0,
                  alpha: float = 0.0
                 ):
-        if isinstance(prompt, str):
-            source = [prompt]
-        else:
-            source = prompt
         
-        source_rm = [x.split("_CLS: ")[-1].strip() for x in source]
+        if isinstance(para_text, str):
+            para_text = [para_text]
+        else:
+            para_text = para_text
+            
+        if isinstance(base_source, str):
+            base_source = [base_source]
+        else:
+            base_source = base_source
+        
+        source_rm = [x.split("_CLS: ")[-1].strip() for x in base_source]
         source_base = ["paraphrase: " + x for x in source_rm]
-        source_expert = [self.expert_prefix + x for x in source_rm]
-        source_antiexpert = [self.antiexpert_prefix + x for x in source_rm]
+        
+        source_expert = para_text
+        source_antiexpert = para_text
         
         target = []
-        for x in source:
+        for x in source_base:
             target.append("<pad>")
             
-        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, pad_to_max_length=True, return_tensors='pt')
+        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, padding='longest', return_tensors='pt')
         input_ids_base = encodings_dict_base['input_ids'].to(self.device)
         attention_mask_base = encodings_dict_base['attention_mask'].to(self.device)
         
-        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, pad_to_max_length=True, return_tensors='pt')
+        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, padding='longest', return_tensors='pt')
         input_ids_exper = encodings_dict_expert['input_ids'].to(self.device)
         attention_mask_exper = encodings_dict_expert['attention_mask'].to(self.device)
         
-        
-        encodings_dict_anti = self.tokenizer.batch_encode_plus(source_antiexpert, pad_to_max_length=True, return_tensors='pt')
-        input_ids_anti = encodings_dict_anti['input_ids'].to(self.device)
-        attention_mask_anti = encodings_dict_anti['attention_mask'].to(self.device)
+        input_ids_anti = input_ids_exper
+        attention_mask_anti = attention_mask_exper
         
         decoder_dict = self.tokenizer.batch_encode_plus(target, return_tensors='pt')
         decoder_input_ids = decoder_dict['input_ids'].to(self.device)
@@ -158,28 +174,30 @@ class DExpertsGeneration:
         unfinished_sents = torch.ones(batch_size, dtype=torch.long, device=self.device)
 
         self.base_model.eval()
-        if self.expert:
-            self.expert.eval()
+        self.expert.eval()
+        
         with torch.no_grad():
             for step in range(max_len):
                 # base model prediction
                 #print("base ", source_base[0])
-                base_logits = self.base_model(input_ids_base, attention_mask = attention_mask_base, 
-                                              decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask)["logits"]
+                base_logits = self.base_model(input_ids = input_ids_base, attention_mask = attention_mask_base, 
+                                              decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask)[0]
+                print("base_logits", base_logits.shape)
                 
                 # expert prediction
                 if self.expert:
                     #print("expert ", source_expert[0])
-                    expert_logits = self.expert(input_ids_exper, attention_mask = attention_mask_exper, 
-                                               decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask)["logits"]
+                    expert_logits = self.expert(input_ids = input_ids_exper, attention_mask = attention_mask_exper, 
+                                               decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask,
+                                               task=self.expert_cls, task_embedding=self.expert_task_embedding)[0]
                 else:
                     expert_logits = base_logits
-                
                 # antiexpert prediction
                 if self.expert:
                     #print("antiexpert ", source_antiexpert[0])
-                    antiexpert_logits = self.expert(input_ids_anti, attention_mask = attention_mask_anti, 
-                                                       decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask)["logits"]
+                    antiexpert_logits = self.expert(input_ids = input_ids_exper, attention_mask = attention_mask_exper, 
+                                               decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask,
+                                               task=self.antiexpert_cls, task_embedding=self.anti_task_embedding)[0]
                 else:
                     antiexpert_logits = base_logits
                 
@@ -254,15 +272,15 @@ def main():
     
     parser.add_argument("--expert_model_name", default=None, type=str, required=True,
                     help="Path to expert model name")
-    
-    parser.add_argument("--anti_model_name", default=None, type=str, required=True,
-                    help="Path to antiexpert model name")
 
     parser.add_argument("--source_cls", default=None, type=str, required=True,
                     help="Prefix of source input")
 
     parser.add_argument("--target_cls", default=None, type=str, required=True,
                     help="Prefix of target style")
+    
+    parser.add_argument("--orginal_base", action='store_true',
+                    help="Whether give the orignial text as base model's input.")
     
     ## Other parameters
     parser.add_argument("--max_seq_length", default=128, type=int,
@@ -288,13 +306,66 @@ def main():
 
 
     args = parser.parse_args()
+    
+    config = json.load(open(os.path.join(args.expert_model_name, "arguments_results.json"), "r"))
+    del config['local_rank']
+    
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments, AdapterTrainingArguments))
+    model_args, data_args, training_args, adapter_args = parser.parse_dict(config)
 
+    from hyperformer.third_party.models import T5ForConditionalGeneration
+    
+    config = T5Config.from_pretrained(
+                training_args.output_dir, 
+                local_files_only = True
+            )
+    
+    if training_args.train_adapters:
+        adapter_config = AutoAdapterConfig.get(adapter_args.adapter_config_name)
+        adapter_config.input_dim = config.d_model
+        adapter_config.tasks = data_args.tasks
+        adapter_config.task_to_adapter = {task:adapter for task, adapter in zip(data_args.tasks, data_args.adapters)} if data_args.adapters is not None else None
+        # If this is a parametric task embedding this mapping makes sense, but in case we use any task embeddings,
+        # then, we do not need any mapping as we use the pretrained task embeddings.
+        adapter_config.task_to_embeddings = {task:embedding for task, embedding in zip(data_args.tasks, data_args.task_embeddings)}\
+             if (data_args.task_embeddings is not None) else None
+        extra_adapter_params = ("task_embedding_dim",
+                                "add_layer_norm_before_adapter",
+                                "add_layer_norm_after_adapter",
+                                "reduction_factor",
+                                "hidden_dim",
+                                "non_linearity",
+                                "train_task_embeddings",
+                                "projected_task_embedding_dim",
+                                "task_hidden_dim",
+                                "conditional_layer_norm",
+                                "train_adapters_blocks",
+                                "unique_hyper_net",
+                                "unique_hyper_net_layer_norm",
+                                "efficient_unique_hyper_net")
+        for p in extra_adapter_params:
+            if hasattr(adapter_args, p) and hasattr(adapter_config, p):
+                setattr(adapter_config, p, getattr(adapter_args, p))
+                
+        adapter_config.device = training_args.device
+    else:
+        adapter_config = None
+
+    ### Load checkpint   
+    last_checkpoint_path = training_args.output_dir
+
+    expert_model = T5ForConditionalGeneration.from_pretrained(
+        last_checkpoint_path,
+        config=config,
+        cache_dir=model_args.cache_dir,
+        adapter_config=adapter_config
+    )
     
     generator = DExpertsGeneration(
         base_model=args.base_model_name, 
-        expert_model=args.expert_model_name,
-        expert_prefix = args.target_cls + "_CLS: ",
-        antiexpert_prefix = args.source_cls + "_CLS: "
+        expert_model=expert_model,
+        expert_cls = args.target_cls,
+        antiexpert_cls = args.source_cls
     )
     
     
@@ -304,7 +375,12 @@ def main():
 
     file_name = args.input_file.split("/")[-1].replace(".tsv", "")
     
-    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name,"dexperts-one",args.source_cls,args.target_cls,str(args.top_p)))
+    model_name = "dexpert-hypert5"
+    
+    if args.orginal_base:
+        model_name = model_name + "-org"
+    
+    output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name, model_name, args.source_cls, args.target_cls, str(args.top_p)))
     if os.path.exists(output_file):
         os.remove(output_file)
         
@@ -315,17 +391,22 @@ def main():
         org_tweets = batch["org_tweet"]
         trans_input_text = batch["trans_input_text"]
         
+        if args.orginal_base: 
+            base_source = org_tweets
+        else:
+            base_source = trans_input_text
         
         final_outputs, source_base, source_expert, source_antiexpert = generator.generate(
-         trans_input_text,
-         max_len = 128,
-         sample = False,
-         filter_p = 0.9,
-         k = args.top_k,
-         p = args.top_p,
-         temperature = 1.0,
-         alpha = args.alpha
-                )
+                         para_text = trans_input_text,
+                         base_source = base_source,
+                         max_len = 128,
+                         sample = False,
+                         filter_p = 0.9,
+                         k = args.top_k,
+                         p = args.top_p,
+                         temperature = 1.0,
+                         alpha = args.alpha
+                                )
         
         if ind == 0:
             print("source_base", source_base)
