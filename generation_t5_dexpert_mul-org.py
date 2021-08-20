@@ -149,16 +149,16 @@ class DExpertsGeneration:
         for x in source_base:
             target.append("<pad>")
             
-        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, pad_to_max_length=True, return_tensors='pt')
+        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, padding='max_length', max_length=128, return_tensors='pt')
         input_ids_base = encodings_dict_base['input_ids'].to(self.device)
         attention_mask_base = encodings_dict_base['attention_mask'].to(self.device)
         
-        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, pad_to_max_length=True, return_tensors='pt')
+        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, padding='max_length', max_length=128, return_tensors='pt')
         input_ids_exper = encodings_dict_expert['input_ids'].to(self.device)
         attention_mask_exper = encodings_dict_expert['attention_mask'].to(self.device)
         
         
-        encodings_dict_anti = self.tokenizer.batch_encode_plus(source_antiexpert, pad_to_max_length=True, return_tensors='pt')
+        encodings_dict_anti = self.tokenizer.batch_encode_plus(source_antiexpert, padding='max_length', max_length=128, return_tensors='pt')
         input_ids_anti = encodings_dict_anti['input_ids'].to(self.device)
         attention_mask_anti = encodings_dict_anti['attention_mask'].to(self.device)
         

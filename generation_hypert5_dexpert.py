@@ -154,11 +154,11 @@ class DExpertsGeneration:
         for x in source_base:
             target.append("<pad>")
             
-        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, padding='longest', return_tensors='pt')
+        encodings_dict_base = self.tokenizer.batch_encode_plus(source_base, padding='max_length', max_length=max_len, return_tensors='pt')
         input_ids_base = encodings_dict_base['input_ids'].to(self.device)
         attention_mask_base = encodings_dict_base['attention_mask'].to(self.device)
         
-        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, padding='longest', return_tensors='pt')
+        encodings_dict_expert = self.tokenizer.batch_encode_plus(source_expert, padding='max_length', max_length=max_len, return_tensors='pt')
         input_ids_exper = encodings_dict_expert['input_ids'].to(self.device)
         attention_mask_exper = encodings_dict_expert['attention_mask'].to(self.device)
         
@@ -195,7 +195,7 @@ class DExpertsGeneration:
                 # antiexpert prediction
                 if self.expert:
                     #print("antiexpert ", source_antiexpert[0])
-                    antiexpert_logits = self.expert(input_ids = input_ids_exper, attention_mask = attention_mask_exper, 
+                    antiexpert_logits = self.expert(input_ids = input_ids_anti, attention_mask = attention_mask_anti, 
                                                decoder_input_ids = decoder_input_ids, decoder_attention_mask = decoder_attention_mask,
                                                task=self.antiexpert_cls, task_embedding=self.anti_task_embedding)[0]
                 else:
@@ -381,6 +381,7 @@ def main():
         model_name = model_name + "-org"
     
     output_file = os.path.join(args.output_dir, "{}-{}_{}-{}_{}_transfer.json".format(file_name, model_name, args.source_cls, args.target_cls, str(args.top_p)))
+    
     if os.path.exists(output_file):
         os.remove(output_file)
         
